@@ -1,5 +1,8 @@
 import nlp
 import textwrap
+import six
+import json
+import os
 
 _CITATION = """\
 @inproceedings{jiang-etal-2020-generalizing,
@@ -25,6 +28,8 @@ natural language analysis tasks within a unified format of span labeling and rel
 datasets covering 10 tasks in the areas of information extraction, syntactic analysis, semantic role labeling, and
 sentiment analysis.
 """
+
+_NAMES = ["wetlab", "conll2003", "semeval2010_8", "ontonotes5", "ptb", "oie2016", "mpqa3", "semeval2014_4"]
 
 _DESCRIPTIONS = {
     "wetlab": textwrap.dedent(
@@ -227,7 +232,7 @@ _CITATIONS = {
 
 _TEXT_FEATURES = {
     "wetlab": {"todo": "todo"},
-    "conll2003": {"todo": "todo"},
+    "conll2003": {"words": "", "pos_tags": "", "chunk_tags": "", "ner_tags": ""},
     "semeval2010_8": {"todo": "todo"},
     "ontonotes5": {"todo": "todo"},
     "ptb": {"todo": "todo"},
@@ -238,7 +243,7 @@ _TEXT_FEATURES = {
 
 _DATA_URLS = {
     "wetlab": "https://github.com/jeniyat/WNUT_2020/tree/master/data",
-    "conll2003": "https://www.clips.uantwerpen.be/conll2003/ner.tgz",
+    "conll2003": "https://raw.githubusercontent.com/glample/tagger/master/dataset/",
     "semeval2010_8": "https://github.com/sahitya0000/Relation-Classification/blob/master/corpus/SemEval2010_task8_all_data.zip",
     "ontonotes5": "",
     "ptb": "",
@@ -258,3 +263,189 @@ _URLS = {
     "semeval2014_4": "http://alt.qcri.org/semeval2014/task4/",
 }
 
+class GladConfig(nlp.BuilderConfig):
+    """BuilderConfig for Break"""
+
+    def __init__(self, data_url, citation, url, text_features, **kwargs):
+        """
+
+        Args:
+            text_features: `dict[string, string]`, map from the name of the feature
+        dict for each text field to the name of the column in the tsv file
+            label_column:
+            label_classes
+            **kwargs: keyword arguments forwarded to super.
+        """
+        super(GladConfig, self).__init__(
+            version=nlp.Version("1.0.0", "New split API (https://tensorflow.org/datasets/splits)"), **kwargs
+        )
+        self.text_features = text_features
+        self.data_url = data_url
+        self.citation = citation
+        self.url = url
+
+class Glad(nlp.GeneratorBasedBuilder):
+    """\
+    The General Language Analysis Datasets (GLAD) benchmark is an English-language benchmark for evaluating many different
+    natural language analysis tasks within a unified format of span labeling and relation prediction. It consists of 8
+    datasets covering 10 tasks in the areas of information extraction, syntactic analysis, semantic role labeling, and
+    sentiment analysis.
+    """
+
+    # TODO(glad): Set up version.
+    VERSION = nlp.Version("0.1.0")
+    BUILDER_CONFIGS = [
+        GladConfig(
+            name=name,
+            description=_DESCRIPTIONS[name],
+            citation=_CITATIONS[name],
+            text_features=_TEXT_FEATURES[name],
+            data_url=_DATA_URLS[name],
+            url=_URLS[name],
+        )
+        for name in _NAMES
+    ]
+
+    @property
+    def manual_download_instructions(self):
+        if self.config.name.startswith("ptb") or self.config.name.startswith("ontonotes"):
+            return textwrap.dedent("""\
+             To use the Penn Treebank Version 3.0 (LDC99T42) and Ontonotes 5.0 (LDC2013T19) components of GLAD, you need
+             to download them from the LDC web site (https://catalog.ldc.upenn.edu/) and save the corresponding
+             tarballs (LDC99T42.tgz) and (LDC2013T19.tgz) in a folder. The folder containing the saved files can be
+             used to load the dataset via `nlp.load_dataset("glad", data_dir="<path/to/folder>")`.
+            """)
+        if self.config.name.startswith("mpqa"):
+            return textwrap.dedent("""\
+             To use the MPQA 3.0 component of GLAD, you need to go to the MPQA web site
+             (https://mpqa.cs.pitt.edu/corpora/mpqa_corpus/), fill out the form to download MPQA 3.0, and save the file
+             (mpqa_3_0_database.zip) in a folder. The folder containing the saved file can be used to load the dataset
+             via `nlp.load_dataset("glad", data_dir="<path/to/folder>")`.
+            """)
+        return None
+
+
+    def _info(self):
+        features = {text_feature: nlp.Value("string") for text_feature in six.iterkeys(self.config.text_features)}
+        # TODO: These need to be added appropriately
+        # if "answers" in features.keys():
+        #     features["answers"] = nlp.features.Sequence(
+        #         {"answer_start": nlp.Value("int32"), "text": nlp.Value("string")}
+        #     )
+        # if self.config.name.startswith("PAWS-X"):
+        #     features["label"] = nlp.Value("string")
+        # if self.config.name == "XNLI":
+        #     features["gold_label"] = nlp.Value("string")
+
+        if self.config.name.startswith("conll2003"):
+            features = nlp.Features(
+                {
+                    "words": nlp.Sequence(nlp.Value("string")),
+                    "pos_tags": nlp.Sequence(nlp.Value("string")),
+                    "chunk_tags": nlp.Sequence(nlp.Value("string")),
+                    "ner_tags": nlp.Sequence(nlp.Value("string")),
+                }
+            )
+        return nlp.DatasetInfo(
+            # This is the description that will appear on the datasets page.
+            description=self.config.description + "\n" + _DESCRIPTION,
+            # nlp.features.FeatureConnectors
+            features=nlp.Features(
+                features
+                # These are the features of your dataset like images, labels ...
+            ),
+            # If there's a common (input, target) tuple from the features,
+            # specify them here. They'll be used if as_supervised=True in
+            # builder.as_dataset.
+            supervised_keys=None,
+            # Homepage of the dataset for documentation
+            homepage="https://github.com/neulab/cmu-multinlp" + "\t" + self.config.url,
+            citation=self.config.citation + "\n" + _CITATION,
+        )
+
+    def _split_generators(self, dl_manager):
+        """Returns SplitGenerators."""
+        # dl_manager is a nlp.download.DownloadManager that can be used to
+        # download and extract URLs
+
+        if self.config.name == "wetlab":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "conll2003":
+            urls_to_download = {
+                "train": os.path.join(self.config.data_url, "eng.train"),
+                "dev": os.path.join(self.config.data_url, "eng.testa"),
+                "test": os.path.join(self.config.data_url, "eng.testb"),
+            }
+            downloaded_files = dl_manager.download_and_extract(urls_to_download)
+            return [
+                nlp.SplitGenerator(name=nlp.Split.TRAIN, gen_kwargs={"filepath": downloaded_files["train"]}),
+                nlp.SplitGenerator(name=nlp.Split.VALIDATION, gen_kwargs={"filepath": downloaded_files["dev"]}),
+                nlp.SplitGenerator(name=nlp.Split.TEST, gen_kwargs={"filepath": downloaded_files["test"]}),
+            ]
+        elif self.config.name == "semeval2010_8":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "ontonotes5":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "ptb":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "oie2016":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "mpqa3":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "semeval2014_4":
+            raise NotImplementedError('not implemented')
+        else:
+            raise ValueError(f'Invalid config name {self.config.name}')
+
+
+    def _generate_examples(self, filepath):
+        """Yields examples."""
+
+        if self.config.name == "wetlab":
+            raise NotImplementedError('not implemented')
+        elif self.config.name.startswith("conll2003"):
+            guid_index = 1
+            with open(filepath, encoding="utf-8") as f:
+                words = []
+                pos_tags = []
+                chunk_tags = []
+                ner_tags = []
+                for line in f:
+                    if line.startswith("-DOCSTART-") or line == "" or line == "\n":
+                        if words:
+                            yield guid_index, {"words": words, "pos_tags": pos_tags,
+                                               "chunk_tags": chunk_tags, "ner_tags": ner_tags}
+                            guid_index += 1
+                            words = []
+                            pos_tags = []
+                            chunk_tags = []
+                            ner_tags = []
+                    else:
+                        # conll2003 data is tab separated
+                        splits = line.strip().split(" ")
+                        words.append(splits[0])
+                        pos_tags.append(splits[1])
+                        chunk_tags.append(splits[2])
+                        ner_tags.append(splits[3])
+        elif self.config.name == "semeval2010_8":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "ontonotes5":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "ptb":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "oie2016":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "mpqa3":
+            raise NotImplementedError('not implemented')
+        elif self.config.name == "semeval2014_4":
+            raise NotImplementedError('not implemented')
+        else:
+            raise ValueError(f'Invalid config name {self.config.name}')
+
+# TODO: This is for debugging, remove before final commit
+if __name__ == "__main__":
+    from nlp import load_dataset
+    dataset = load_dataset("./datasets/glad", "conll2003")
+    for spl in ('train', 'validation', 'test'):
+        dataset_spl = dataset[spl]
+        print(dataset_spl[0])
