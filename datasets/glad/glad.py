@@ -232,7 +232,7 @@ _CITATIONS = {
 
 _TEXT_FEATURES = {
     "wetlab": {"todo": "todo"},
-    "conll2003": {"words": "", "pos_tags": "", "chunk_tags": "", "ner_tags": ""},
+    "conll2003": {"words": "", "pos_tags": "", "chunk_spans": "", "ner_spans": ""},
     "semeval2010_8": {"todo": "todo"},
     "ontonotes5": {"todo": "todo"},
     "ptb": {"todo": "todo"},
@@ -342,8 +342,11 @@ class Glad(nlp.GeneratorBasedBuilder):
                 {
                     "words": nlp.Sequence(nlp.Value("string")),
                     "pos_tags": nlp.Sequence(nlp.Value("string")),
-                    "chunk_tags": nlp.Sequence(nlp.Value("string")),
-                    "ner_tags": nlp.Sequence(nlp.Value("string")),
+                    "chunk_spans": nlp.features.Sequence(
+                        {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string") }
+                    ),
+                    "ner_spans":
+                        {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string")}
                 }
             )
         return nlp.DatasetInfo(
@@ -397,7 +400,6 @@ class Glad(nlp.GeneratorBasedBuilder):
         else:
             raise ValueError(f'Invalid config name {self.config.name}')
 
-
     def _generate_examples(self, filepath):
         """Yields examples."""
 
@@ -406,27 +408,30 @@ class Glad(nlp.GeneratorBasedBuilder):
         elif self.config.name.startswith("conll2003"):
             guid_index = 1
             with open(filepath, encoding="utf-8") as f:
-                words = []
-                pos_tags = []
-                chunk_tags = []
-                ner_tags = []
+                words, pos_tags, chunk_spans, ner_spans = [], [], [], []
+                chunk_start, chunk_tag, ner_start, ner_tag = 0, None, 0, None
                 for line in f:
                     if line.startswith("-DOCSTART-") or line == "" or line == "\n":
                         if words:
                             yield guid_index, {"words": words, "pos_tags": pos_tags,
-                                               "chunk_tags": chunk_tags, "ner_tags": ner_tags}
+                                               "chunk_spans": chunk_spans, "ner_spans": ner_spans}
                             guid_index += 1
-                            words = []
-                            pos_tags = []
-                            chunk_tags = []
-                            ner_tags = []
+                            words, pos_tags, chunk_spans, ner_spans = [], [], [], []
                     else:
-                        # conll2003 data is tab separated
+                        # conll2003 data is space separated, 'IO' tagging scheme for chunks and named entities
                         splits = line.strip().split(" ")
+                        tag = splits[2][2:] if splits[2].startswith('I-') else None
+                        if tag != chunk_tag:
+                            if chunk_tag is not None:
+                                chunk_spans.append( {'start': chunk_start, 'end': len(words)+1, 'tag': chunk_tag} )
+                            chunk_tag, chunk_start = tag, len(words)
+                        tag = splits[3][2:] if splits[3].startswith('I-') else None
+                        if tag != ner_tag:
+                            if ner_tag is not None:
+                                ner_spans.append( {'start': ner_start, 'end': len(words)+1, 'tag': ner_tag} )
+                            ner_tag, ner_start = tag, len(words)
                         words.append(splits[0])
                         pos_tags.append(splits[1])
-                        chunk_tags.append(splits[2])
-                        ner_tags.append(splits[3])
         elif self.config.name == "semeval2010_8":
             raise NotImplementedError('not implemented')
         elif self.config.name == "ontonotes5":
