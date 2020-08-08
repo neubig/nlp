@@ -343,10 +343,11 @@ class Glad(nlp.GeneratorBasedBuilder):
                     "words": nlp.Sequence(nlp.Value("string")),
                     "pos_tags": nlp.Sequence(nlp.Value("string")),
                     "chunk_spans": nlp.features.Sequence(
-                        {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string") }
-                    ),
-                    "ner_spans":
                         {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string")}
+                    ),
+                    "ner_spans": nlp.features.Sequence(
+                        {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string")}
+                    ),
                 }
             )
         return nlp.DatasetInfo(
@@ -400,6 +401,14 @@ class Glad(nlp.GeneratorBasedBuilder):
         else:
             raise ValueError(f'Invalid config name {self.config.name}')
 
+    def tuples_to_dict(self, span_list):
+        starts, ends, tags = [], [], []
+        for start, end, tag in span_list:
+            starts.append(start)
+            ends.append(end)
+            tags.append(tag)
+        return {'start': starts, 'end': ends, 'tag': tags}
+
     def _generate_examples(self, filepath):
         """Yields examples."""
 
@@ -414,7 +423,8 @@ class Glad(nlp.GeneratorBasedBuilder):
                     if line.startswith("-DOCSTART-") or line == "" or line == "\n":
                         if words:
                             yield guid_index, {"words": words, "pos_tags": pos_tags,
-                                               "chunk_spans": chunk_spans, "ner_spans": ner_spans}
+                                               "chunk_spans": self.tuples_to_dict(chunk_spans),
+                                               "ner_spans": self.tuples_to_dict(ner_spans)}
                             guid_index += 1
                             words, pos_tags, chunk_spans, ner_spans = [], [], [], []
                     else:
@@ -423,12 +433,12 @@ class Glad(nlp.GeneratorBasedBuilder):
                         tag = splits[2][2:] if splits[2].startswith('I-') else None
                         if tag != chunk_tag:
                             if chunk_tag is not None:
-                                chunk_spans.append( {'start': chunk_start, 'end': len(words)+1, 'tag': chunk_tag} )
+                                chunk_spans.append( (chunk_start, len(words)+1, chunk_tag) )
                             chunk_tag, chunk_start = tag, len(words)
                         tag = splits[3][2:] if splits[3].startswith('I-') else None
                         if tag != ner_tag:
                             if ner_tag is not None:
-                                ner_spans.append( {'start': ner_start, 'end': len(words)+1, 'tag': ner_tag} )
+                                ner_spans.append( (ner_start, len(words)+1, ner_tag) )
                             ner_tag, ner_start = tag, len(words)
                         words.append(splits[0])
                         pos_tags.append(splits[1])
