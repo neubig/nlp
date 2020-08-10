@@ -242,7 +242,7 @@ _TEXT_FEATURES = {
 }
 
 _DATA_URLS = {
-    "wetlab": "https://github.com/jeniyat/WNUT_2020/tree/master/data",
+    "wetlab": "https://github.com/jeniyat/WNUT_2020/archive/55822d5d30843501b6293a0202479bbe4166bee8.zip",
     "conll2003": "https://raw.githubusercontent.com/glample/tagger/master/dataset/",
     "semeval2010_8": "https://drive.google.com/uc?export=download&id=0B_jQiLugGTAkMDQ5ZjZiMTUtMzQ1Yy00YWNmLWJlZDYtOWY1ZDMwY2U4YjFk",
     "ontonotes5": "",
@@ -388,6 +388,8 @@ class Glad(nlp.GeneratorBasedBuilder):
         # download and extract URLs
 
         if self.config.name == "wetlab":
+            downloaded_dir = os.path.join(dl_manager.download_and_extract(self.config.data_url))
+            # https://github.com/jeniyat/WNUT_2020/archive/55822d5d30843501b6293a0202479bbe4166bee8.zip
             raise NotImplementedError('not implemented')
         elif self.config.name == "conll2003":
             urls_to_download = {
