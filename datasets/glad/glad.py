@@ -233,7 +233,7 @@ _CITATIONS = {
 _TEXT_FEATURES = {
     "wetlab": {"todo": "todo"},
     "conll2003": {"words": "", "pos_tags": "", "chunk_spans": "", "ner_spans": ""},
-    "semeval2010_8": {"todo": "todo"},
+    "semeval2010_8": {"words": "", "spans": "", "rels": ""},
     "ontonotes5": {"todo": "todo"},
     "ptb": {"todo": "todo"},
     "oie2016": {"todo": "todo"},
@@ -244,7 +244,7 @@ _TEXT_FEATURES = {
 _DATA_URLS = {
     "wetlab": "https://github.com/jeniyat/WNUT_2020/tree/master/data",
     "conll2003": "https://raw.githubusercontent.com/glample/tagger/master/dataset/",
-    "semeval2010_8": "https://github.com/sahitya0000/Relation-Classification/blob/master/corpus/SemEval2010_task8_all_data.zip",
+    "semeval2010_8": "https://drive.google.com/uc?export=download&id=0B_jQiLugGTAkMDQ5ZjZiMTUtMzQ1Yy00YWNmLWJlZDYtOWY1ZDMwY2U4YjFk",
     "ontonotes5": "",
     "ptb": "",
     "oie2016": "https://github.com/gabrielStanovsky/oie-benchmark/blob/master/snapshot_oie_corpus.tar.gz",
@@ -253,7 +253,7 @@ _DATA_URLS = {
 }
 
 _URLS = {
-    "wetlab": "https://github.com/jeniyat/WNUT_2020/tree/master/data",
+    "wetlab": "http://bionlp.osu.edu:5000/protocols",
     "conll2003": "https://www.clips.uantwerpen.be/conll2003/ner/",
     "semeval2010_8": "https://docs.google.com/document/d/1QO_CnmvNRnYwNWu1-QCAeR5ToQYkXUqFeAJbdEhsq7w/preview",
     "ontonotes5": "https://catalog.ldc.upenn.edu/LDC2013T19",
@@ -262,6 +262,9 @@ _URLS = {
     "mpqa3": "https://mpqa.cs.pitt.edu/corpora/mpqa_corpus/",
     "semeval2014_4": "http://alt.qcri.org/semeval2014/task4/",
 }
+
+# Note, some code adapted from the GLAD data-processing code:
+# https://github.com/neulab/cmu-multinlp/tree/master/data
 
 class GladConfig(nlp.BuilderConfig):
     """BuilderConfig for Break"""
@@ -350,6 +353,18 @@ class Glad(nlp.GeneratorBasedBuilder):
                     ),
                 }
             )
+        if self.config.name.startswith("conll2003"):
+            features = nlp.Features(
+                {
+                    "words": nlp.Sequence(nlp.Value("string")),
+                    "spans": nlp.features.Sequence(
+                        {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string")}
+                    ),
+                    "rels": nlp.features.Sequence(
+                        {"start": nlp.Value("int32"), "end": nlp.Value("int32"), "tag": nlp.Value("string")}
+                    )
+                }
+            )
         return nlp.DatasetInfo(
             # This is the description that will appear on the datasets page.
             description=self.config.description + "\n" + _DESCRIPTION,
@@ -387,7 +402,14 @@ class Glad(nlp.GeneratorBasedBuilder):
                 nlp.SplitGenerator(name=nlp.Split.TEST, gen_kwargs={"filepath": downloaded_files["test"]}),
             ]
         elif self.config.name == "semeval2010_8":
-            raise NotImplementedError('not implemented')
+            downloaded_dir = os.path.join(dl_manager.download_and_extract(self.config.data_url),
+                                          "SemEval2010_task8_all_data")
+            downloaded_train = os.path.join(downloaded_dir, "SemEval2010_task8_training", "TRAIN_FILE.TXT")
+            downloaded_test = os.path.join(downloaded_dir, "SemEval2010_task8_testing_keys", "TEST_FILE_FULL.TXT")
+            return [
+                nlp.SplitGenerator(name=nlp.Split.TRAIN, gen_kwargs={"filepath": downloaded_train}),
+                nlp.SplitGenerator(name=nlp.Split.TEST, gen_kwargs={"filepath": downloaded_test}),
+            ]
         elif self.config.name == "ontonotes5":
             raise NotImplementedError('not implemented')
         elif self.config.name == "ptb":
@@ -409,41 +431,94 @@ class Glad(nlp.GeneratorBasedBuilder):
             tags.append(tag)
         return {'start': starts, 'end': ends, 'tag': tags}
 
+    def conll03_file_to_spans(self, filepath):
+        guid_index = 1
+        with open(filepath, encoding="utf-8") as f:
+            words, pos_tags, chunk_spans, ner_spans = [], [], [], []
+            chunk_start, chunk_tag, ner_start, ner_tag = 0, None, 0, None
+            for line in f:
+                if line.startswith("-DOCSTART-") or line == "" or line == "\n":
+                    if words:
+                        yield guid_index, {"words": words, "pos_tags": pos_tags,
+                                           "chunk_spans": self.tuples_to_dict(chunk_spans),
+                                           "ner_spans": self.tuples_to_dict(ner_spans)}
+                        guid_index += 1
+                        words, pos_tags, chunk_spans, ner_spans = [], [], [], []
+                else:
+                    # conll2003 data is space separated, 'IO' tagging scheme for chunks and named entities
+                    splits = line.strip().split(" ")
+                    tag = splits[2][2:] if splits[2].startswith('I-') else None
+                    if tag != chunk_tag:
+                        if chunk_tag is not None:
+                            chunk_spans.append((chunk_start, len(words) + 1, chunk_tag))
+                        chunk_tag, chunk_start = tag, len(words)
+                    tag = splits[3][2:] if splits[3].startswith('I-') else None
+                    if tag != ner_tag:
+                        if ner_tag is not None:
+                            ner_spans.append((ner_start, len(words) + 1, ner_tag))
+                        ner_tag, ner_start = tag, len(words)
+                    words.append(splits[0])
+                    pos_tags.append(splits[1])
+
+    def semeval2010_8_get_location_and_remove(sent, sub_str):
+        loc = sent.find(sub_str)
+        sent = sent.replace(sub_str, '')
+        return loc, sent
+
+    def semeval2010_8_file_to_spanrels(self, filepath):
+        # Questions about the following code:
+        # * How to deal with tokenization in semeval2010_8? It seems that the text is not tokenized (e.g. punctuation is still attached to the words) in the annotated data, so it's non-trivial to get word boundaries and spans/relations associated with individual word IDs.
+        # * It seems that it's treating "Cause-Effect(e1,e2)" and "Cause-Effect(e2,e1)" as different relation labels, and always having the arrows point from left to right? It seems like maybe just having the relation be "Cause-Effect" and having the arrow point from e1 to e2 might be a better option.
+        raise NotImplementedError('semeval2010_8_file_to_spanrels not implemented yet')
+
+        with open(filepath, 'r') as fin:
+            ns = 0
+            sent_offset = 0
+            while True:
+                sent = fin.readline().strip()
+                if sent is None or sent == '':
+                    break
+                entity_ind, rel_ind = 1, 1
+
+                rel = fin.readline().strip()
+                _ = fin.readline()
+                _ = fin.readline()
+
+                sid, sent = sent.split('\t')
+                sent = sent[1:-1]  # remove "
+                e1_start, sent = self.semeval2010_8_get_location_and_remove(sent, '<e1>')
+                e1_end, sent = self.semeval2010_8_get_location_and_remove(sent, '</e1>')
+                e1 = sent[e1_start:e1_end]
+                e2_start, sent = self.semeval2010_8_get_location_and_remove(sent, '<e2>')
+                e2_end, sent = self.semeval2010_8_get_location_and_remove(sent, '</e2>')
+                e2 = sent[e2_start:e2_end]
+                if e2_start <= e1_end:
+                    raise Exception('e1 should be before e2')
+
+                doc_out.write('{}\n'.format(sent))
+
+                k1, k2 = 'T{}'.format(entity_ind), 'T{}'.format(entity_ind + 1)
+                ann_out.write('{}\t{} {} {}\t{}\n'.format(
+                    k1, 'mention', e1_start + sent_offset, e1_end + sent_offset, e1))
+                ann_out.write('{}\t{} {} {}\t{}\n'.format(
+                    k2, 'mention', e2_start + sent_offset, e2_end + sent_offset, e2))
+                ann_out.write('{}\t{} {} {}\n'.format(
+                    'R{}'.format(rel_ind), rel, 'Arg1:{}'.format(k1), 'Arg2:{}'.format(k2)))
+
+                sent_offset += len(sent) + 1
+                entity_ind += 2
+                rel_ind += 1
+                ns += 1
+
     def _generate_examples(self, filepath):
         """Yields examples."""
 
         if self.config.name == "wetlab":
             raise NotImplementedError('not implemented')
         elif self.config.name.startswith("conll2003"):
-            guid_index = 1
-            with open(filepath, encoding="utf-8") as f:
-                words, pos_tags, chunk_spans, ner_spans = [], [], [], []
-                chunk_start, chunk_tag, ner_start, ner_tag = 0, None, 0, None
-                for line in f:
-                    if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                        if words:
-                            yield guid_index, {"words": words, "pos_tags": pos_tags,
-                                               "chunk_spans": self.tuples_to_dict(chunk_spans),
-                                               "ner_spans": self.tuples_to_dict(ner_spans)}
-                            guid_index += 1
-                            words, pos_tags, chunk_spans, ner_spans = [], [], [], []
-                    else:
-                        # conll2003 data is space separated, 'IO' tagging scheme for chunks and named entities
-                        splits = line.strip().split(" ")
-                        tag = splits[2][2:] if splits[2].startswith('I-') else None
-                        if tag != chunk_tag:
-                            if chunk_tag is not None:
-                                chunk_spans.append( (chunk_start, len(words)+1, chunk_tag) )
-                            chunk_tag, chunk_start = tag, len(words)
-                        tag = splits[3][2:] if splits[3].startswith('I-') else None
-                        if tag != ner_tag:
-                            if ner_tag is not None:
-                                ner_spans.append( (ner_start, len(words)+1, ner_tag) )
-                            ner_tag, ner_start = tag, len(words)
-                        words.append(splits[0])
-                        pos_tags.append(splits[1])
+            return self.conll03_file_to_spans(filepath)
         elif self.config.name == "semeval2010_8":
-            raise NotImplementedError('not implemented')
+            return self.semeval2010_8_file_to_spans(filepath)
         elif self.config.name == "ontonotes5":
             raise NotImplementedError('not implemented')
         elif self.config.name == "ptb":
@@ -460,7 +535,7 @@ class Glad(nlp.GeneratorBasedBuilder):
 # TODO: This is for debugging, remove before final commit
 if __name__ == "__main__":
     from nlp import load_dataset
-    dataset = load_dataset("./datasets/glad", "conll2003")
+    dataset = load_dataset("./datasets/glad", "semeval2010_8")
     for spl in ('train', 'validation', 'test'):
         dataset_spl = dataset[spl]
         print(dataset_spl[0])
