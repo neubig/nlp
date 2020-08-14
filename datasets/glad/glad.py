@@ -3,6 +3,7 @@ import textwrap
 import six
 import json
 import os
+from typing import Dict, List, Tuple
 
 _CITATION = """\
 @inproceedings{jiang-etal-2020-generalizing,
@@ -236,7 +237,7 @@ _TEXT_FEATURES = {
     "semeval2010_8": {"words": "", "spans": "", "rels": ""},
     "ontonotes5": {"todo": "todo"},
     "ptb": {"todo": "todo"},
-    "oie2016": {"todo": "todo"},
+    "oie2016": {"words": "", "spans": "", "rels": ""},
     "mpqa3": {"todo": "todo"},
     "semeval2014_4": {"todo": "todo"},
 }
@@ -247,7 +248,7 @@ _DATA_URLS = {
     "semeval2010_8": "https://drive.google.com/uc?export=download&id=0B_jQiLugGTAkMDQ5ZjZiMTUtMzQ1Yy00YWNmLWJlZDYtOWY1ZDMwY2U4YjFk",
     "ontonotes5": "",
     "ptb": "",
-    "oie2016": "https://github.com/gabrielStanovsky/oie-benchmark/blob/master/snapshot_oie_corpus.tar.gz",
+    "oie2016": "https://github.com/jzbjyb/oie_rank/blob/master/data/",
     "mpqa3": "",
     "semeval2014_4": "http://alt.qcri.org/semeval2014/task4/index.php?id=data-and-tools",
 }
@@ -417,7 +418,18 @@ class Glad(nlp.GeneratorBasedBuilder):
         elif self.config.name == "ptb":
             raise NotImplementedError('not implemented')
         elif self.config.name == "oie2016":
-            raise NotImplementedError('not implemented')
+            # https://github.com/jzbjyb/oie_rank/blob/master/data/test/oie2016.test.gold_conll
+            urls_to_download = {
+                "train": os.path.join(self.config.data_url, "train/oie2016.train.gold_conll"),
+                "dev": os.path.join(self.config.data_url, "dev/oie2016.dev.gold_conll"),
+                "test": os.path.join(self.config.data_url, "test/oie2016.test.gold_conll"),
+            }
+            downloaded_files = dl_manager.download_and_extract(urls_to_download)
+            return [
+                nlp.SplitGenerator(name=nlp.Split.TRAIN, gen_kwargs={"filepath": downloaded_files["train"]}),
+                nlp.SplitGenerator(name=nlp.Split.VALIDATION, gen_kwargs={"filepath": downloaded_files["dev"]}),
+                nlp.SplitGenerator(name=nlp.Split.TEST, gen_kwargs={"filepath": downloaded_files["test"]}),
+            ]
         elif self.config.name == "mpqa3":
             raise NotImplementedError('not implemented')
         elif self.config.name == "semeval2014_4":
@@ -512,7 +524,38 @@ class Glad(nlp.GeneratorBasedBuilder):
                 rel_ind += 1
                 ns += 1
 
-    def _generate_examples(self, filepath):
+    def oie2016_file_to_spanrels(self, filepath):
+        # * Question: can we implement this so we predict all OIE extractions for a sentence at the same time?
+        raise NotImplementedError('oie2016_file_to_spanrels')
+        guid_index = 1
+        with open(filepath, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("-DOCSTART-") or line == "" or line == "\n":
+                    if words:
+                        yield guid_index, {"words": words, "pos_tags": pos_tags,
+                                           "chunk_spans": self.tuples_to_dict(chunk_spans),
+                                           "ner_spans": self.tuples_to_dict(ner_spans)}
+                        guid_index += 1
+                        words, pos_tags, chunk_spans, ner_spans = [], [], [], []
+                else:
+                    # conll2003 data is space separated, 'IO' tagging scheme for chunks and named entities
+                    splits = line.strip().split(" ")
+                    tag = splits[2][2:] if splits[2].startswith('I-') else None
+                    if tag != chunk_tag:
+                        if chunk_tag is not None:
+                            chunk_spans.append((chunk_start, len(words) + 1, chunk_tag))
+                        chunk_tag, chunk_start = tag, len(words)
+                    tag = splits[3][2:] if splits[3].startswith('I-') else None
+                    if tag != ner_tag:
+                        if ner_tag is not None:
+                            ner_spans.append((ner_start, len(words) + 1, ner_tag))
+                        ner_tag, ner_start = tag, len(words)
+                    words.append(splits[0])
+                    pos_tags.append(splits[1])
+
+
+
+def _generate_examples(self, filepath):
         """Yields examples."""
 
         if self.config.name == "wetlab":
@@ -526,7 +569,7 @@ class Glad(nlp.GeneratorBasedBuilder):
         elif self.config.name == "ptb":
             raise NotImplementedError('not implemented')
         elif self.config.name == "oie2016":
-            raise NotImplementedError('not implemented')
+            return self.oie2016_file_to_spans(filepath)
         elif self.config.name == "mpqa3":
             raise NotImplementedError('not implemented')
         elif self.config.name == "semeval2014_4":
@@ -537,7 +580,7 @@ class Glad(nlp.GeneratorBasedBuilder):
 # TODO: This is for debugging, remove before final commit
 if __name__ == "__main__":
     from nlp import load_dataset
-    dataset = load_dataset("./datasets/glad", "semeval2010_8")
+    dataset = load_dataset("./datasets/glad", "oie2016")
     for spl in ('train', 'validation', 'test'):
         dataset_spl = dataset[spl]
         print(dataset_spl[0])
