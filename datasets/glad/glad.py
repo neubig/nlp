@@ -1,6 +1,7 @@
 import nlp
 import textwrap
 import six
+import re
 import json
 import os
 from typing import Dict, List, Tuple
@@ -248,7 +249,7 @@ _DATA_URLS = {
     "semeval2010_8": "https://drive.google.com/uc?export=download&id=0B_jQiLugGTAkMDQ5ZjZiMTUtMzQ1Yy00YWNmLWJlZDYtOWY1ZDMwY2U4YjFk",
     "ontonotes5": "",
     "ptb": "",
-    "oie2016": "https://github.com/jzbjyb/oie_rank/blob/master/data/",
+    "oie2016": "https://raw.githubusercontent.com/jzbjyb/oie_rank/master/data/",
     "mpqa3": "",
     "semeval2014_4": "http://alt.qcri.org/semeval2014/task4/index.php?id=data-and-tools",
 }
@@ -527,35 +528,59 @@ class Glad(nlp.GeneratorBasedBuilder):
                 rel_ind += 1
                 ns += 1
 
-    def oie2016_file_to_spanrels(self, filepath):
-        # * Question: can we implement this so we predict all OIE extractions for a sentence at the same time?
-        last_raw, sid = None, 0
-        with open(filepath, encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                    if words:
-                        yield guid_index, {"words": words, "pos_tags": pos_tags,
-                                           "chunk_spans": self.tuples_to_dict(chunk_spans),
-                                           "ner_spans": self.tuples_to_dict(ner_spans)}
-                        guid_index += 1
-                        words, pos_tags, chunk_spans, ner_spans = [], [], [], []
+    def oie2016_spanrels(self, seg):
+        open_re = r'\(([A-Z0-9]+)\*(\)?)'
+        spans, reltags = [], []
+        start = None, None
+        vspan = None
+        for wid, stag in enumerate(self.conll_col(seg, 11)):
+            m = re.match(open_re, stag)
+            if m:
+                my_tag = m.group(1)
+                reltags.append(my_tag)
+                if my_tag == 'V':
+                    vspan = len(spans)
+                if m.group(2) == ')':
+                    spans.append( (wid, wid+1, 'X') )
                 else:
-                    # conll2003 data is space separated, 'IO' tagging scheme for chunks and named entities
-                    splits = line.strip().split(" ")
-                    tag = splits[2][2:] if splits[2].startswith('I-') else None
-                    if tag != chunk_tag:
-                        if chunk_tag is not None:
-                            chunk_spans.append((chunk_start, len(words) + 1, chunk_tag))
-                        chunk_tag, chunk_start = tag, len(words)
-                    tag = splits[3][2:] if splits[3].startswith('I-') else None
-                    if tag != ner_tag:
-                        if ner_tag is not None:
-                            ner_spans.append((ner_start, len(words) + 1, ner_tag))
-                        ner_tag, ner_start = tag, len(words)
-                    words.append(splits[0])
-                    pos_tags.append(splits[1])
+                    start = wid
+            elif stag == '*)':
+                spans.append( (start, wid+1, 'X') )
+            elif stag != '*':
+                raise ValueError(f'Bad value in OIE tag column {stag}')
+        rels = []
+        for i, rs in enumerate(reltags):
+            if i != vspan:
+                rels.append( (vspan, i, rs) )
+        return spans, rels
 
-
+    def oie2016_file_to_spanrels(self, filepath):
+        last_words, last_spans, last_rels = None, None, None
+        sid = 1
+        with open(filepath, encoding="utf-8") as f:
+            for seg in self.conll_iterator(f, separator='\t'):
+                words = self.conll_col(seg, 3)
+                spans, rels = self.oie2016_spanrels(seg)
+                # If they are the same sentence, accumulate, merging and re-indexing the spans
+                if words == last_words:
+                    if not last_span_map:
+                        last_span_map = {s: i for (i,s) in enumerate(last_spans)}
+                    for span in spans:
+                        if span not in last_span_map:
+                            last_span_map[span] = len(last_spans)
+                            last_spans.append(span)
+                    for rel in rels:
+                        last_rels.append( (last_span_map[spans[rel[0]]], last_span_map[spans[rel[1]]], rel[2]) )
+                else:
+                    # Emit the results
+                    if last_words:
+                        yield sid, {"words": last_words,
+                                    "spans": self.tuples_to_dict(last_spans), "rels": self.tuples_to_dict(last_rels)}
+                        sid += 1
+                    last_words, last_spans, last_span_map, last_rels = words, spans, None, rels
+            if last_words:
+                yield sid, {"words": last_words,
+                            "spans": self.tuples_to_dict(last_spans), "rels": self.tuples_to_dict(last_rels)}
 
     def _generate_examples(self, filepath):
         """Yields examples."""
@@ -571,7 +596,7 @@ class Glad(nlp.GeneratorBasedBuilder):
         elif self.config.name == "ptb":
             raise NotImplementedError('not implemented')
         elif self.config.name == "oie2016":
-            return self.oie2016_file_to_spans(filepath)
+            return self.oie2016_file_to_spanrels(filepath)
         elif self.config.name == "mpqa3":
             raise NotImplementedError('not implemented')
         elif self.config.name == "semeval2014_4":
@@ -582,7 +607,7 @@ class Glad(nlp.GeneratorBasedBuilder):
 # TODO: This is for debugging, remove before final commit
 if __name__ == "__main__":
     from nlp import load_dataset
-    dataset = load_dataset("./datasets/glad", "conll2003")
+    dataset = load_dataset("./datasets/glad", "oie2016")
     for spl in ('train', 'validation', 'test'):
         dataset_spl = dataset[spl]
-        print(dataset_spl[0])
+        print(dataset_spl[-1])
