@@ -354,7 +354,7 @@ class Glad(nlp.GeneratorBasedBuilder):
                     ),
                 }
             )
-        if self.config.name.startswith("conll2003"):
+        elif self.config.name.startswith("oie2016"):
             features = nlp.Features(
                 {
                     "words": nlp.Sequence(nlp.Value("string")),
@@ -437,6 +437,19 @@ class Glad(nlp.GeneratorBasedBuilder):
         else:
             raise ValueError(f'Invalid config name {self.config.name}')
 
+    def conll_iterator(self, stream, separator=' '):
+        curr_list = list()
+        for line in stream:
+            line = line.strip()
+            if line.startswith("-DOCSTART-") or line == "" or line == "\n":
+                if len(curr_list):
+                    yield curr_list
+                curr_list = list()
+            else:
+                curr_list.append(line.split(separator))
+        if len(curr_list):
+            yield curr_list
+
     def tuples_to_dict(self, span_list):
         starts, ends, tags = [], [], []
         for start, end, tag in span_list:
@@ -446,33 +459,27 @@ class Glad(nlp.GeneratorBasedBuilder):
         return {'start': starts, 'end': ends, 'tag': tags}
 
     def conll03_file_to_spans(self, filepath):
-        guid_index = 1
         with open(filepath, encoding="utf-8") as f:
-            words, pos_tags, chunk_spans, ner_spans = [], [], [], []
-            chunk_start, chunk_tag, ner_start, ner_tag = 0, None, 0, None
-            for line in f:
-                if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                    if words:
-                        yield guid_index, {"words": words, "pos_tags": pos_tags,
-                                           "chunk_spans": self.tuples_to_dict(chunk_spans),
-                                           "ner_spans": self.tuples_to_dict(ner_spans)}
-                        guid_index += 1
-                        words, pos_tags, chunk_spans, ner_spans = [], [], [], []
-                else:
-                    # conll2003 data is space separated, 'IO' tagging scheme for chunks and named entities
-                    splits = line.strip().split(" ")
+            for sid, seg in enumerate(self.conll_iterator(f)):
+                words, pos_tags, chunk_spans, ner_spans = [], [], [], []
+                chunk_start, chunk_tag, ner_start, ner_tag = 0, None, 0, None
+                for wid, splits in enumerate(seg):
                     tag = splits[2][2:] if splits[2].startswith('I-') else None
                     if tag != chunk_tag:
                         if chunk_tag is not None:
-                            chunk_spans.append((chunk_start, len(words) + 1, chunk_tag))
-                        chunk_tag, chunk_start = tag, len(words)
+                            chunk_spans.append((chunk_start, wid + 1, chunk_tag))
+                        chunk_tag, chunk_start = tag, wid
                     tag = splits[3][2:] if splits[3].startswith('I-') else None
                     if tag != ner_tag:
                         if ner_tag is not None:
-                            ner_spans.append((ner_start, len(words) + 1, ner_tag))
-                        ner_tag, ner_start = tag, len(words)
+                            ner_spans.append((ner_start, wid + 1, ner_tag))
+                        ner_tag, ner_start = tag, wid
                     words.append(splits[0])
                     pos_tags.append(splits[1])
+                yield sid+1, {"words": words, "pos_tags": pos_tags,
+                              "chunk_spans": self.tuples_to_dict(chunk_spans),
+                              "ner_spans": self.tuples_to_dict(ner_spans)}
+
 
     def semeval2010_8_get_location_and_remove(sent, sub_str):
         loc = sent.find(sub_str)
@@ -526,8 +533,6 @@ class Glad(nlp.GeneratorBasedBuilder):
 
     def oie2016_file_to_spanrels(self, filepath):
         # * Question: can we implement this so we predict all OIE extractions for a sentence at the same time?
-        raise NotImplementedError('oie2016_file_to_spanrels')
-        guid_index = 1
         with open(filepath, encoding="utf-8") as f:
             for line in f:
                 if line.startswith("-DOCSTART-") or line == "" or line == "\n":
@@ -555,7 +560,7 @@ class Glad(nlp.GeneratorBasedBuilder):
 
 
 
-def _generate_examples(self, filepath):
+    def _generate_examples(self, filepath):
         """Yields examples."""
 
         if self.config.name == "wetlab":
@@ -580,7 +585,7 @@ def _generate_examples(self, filepath):
 # TODO: This is for debugging, remove before final commit
 if __name__ == "__main__":
     from nlp import load_dataset
-    dataset = load_dataset("./datasets/glad", "oie2016")
+    dataset = load_dataset("./datasets/glad", "conll2003")
     for spl in ('train', 'validation', 'test'):
         dataset_spl = dataset[spl]
         print(dataset_spl[0])
