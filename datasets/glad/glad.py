@@ -437,6 +437,9 @@ class Glad(nlp.GeneratorBasedBuilder):
         else:
             raise ValueError(f'Invalid config name {self.config.name}')
 
+    def conll_col(self, splits, col):
+        return [x[col] for x in splits]
+
     def conll_iterator(self, stream, separator=' '):
         curr_list = list()
         for line in stream:
@@ -458,28 +461,21 @@ class Glad(nlp.GeneratorBasedBuilder):
             tags.append(tag)
         return {'start': starts, 'end': ends, 'tag': tags}
 
-    def conll03_file_to_spans(self, filepath):
+    def conll2003_spans(self, seg, col):
+        tag, start, spans = None, 0, []
+        for wid, splits in enumerate(seg):
+            my_tag = splits[col][2:] if splits[col].startswith('I-') else None
+            if my_tag != tag:
+                if tag is not None:
+                    spans.append((start, wid, tag))
+                tag, start = my_tag, wid
+        return self.tuples_to_dict(spans)
+
+    def conll2003_file_to_spans(self, filepath):
         with open(filepath, encoding="utf-8") as f:
             for sid, seg in enumerate(self.conll_iterator(f)):
-                words, pos_tags, chunk_spans, ner_spans = [], [], [], []
-                chunk_start, chunk_tag, ner_start, ner_tag = 0, None, 0, None
-                for wid, splits in enumerate(seg):
-                    tag = splits[2][2:] if splits[2].startswith('I-') else None
-                    if tag != chunk_tag:
-                        if chunk_tag is not None:
-                            chunk_spans.append((chunk_start, wid + 1, chunk_tag))
-                        chunk_tag, chunk_start = tag, wid
-                    tag = splits[3][2:] if splits[3].startswith('I-') else None
-                    if tag != ner_tag:
-                        if ner_tag is not None:
-                            ner_spans.append((ner_start, wid + 1, ner_tag))
-                        ner_tag, ner_start = tag, wid
-                    words.append(splits[0])
-                    pos_tags.append(splits[1])
-                yield sid+1, {"words": words, "pos_tags": pos_tags,
-                              "chunk_spans": self.tuples_to_dict(chunk_spans),
-                              "ner_spans": self.tuples_to_dict(ner_spans)}
-
+                yield sid+1, {"words": self.conll_col(seg,0), "pos_tags": self.conll_col(seg,1),
+                              "chunk_spans": self.conll2003_spans(seg,2), "ner_spans": self.conll2003_spans(seg,3)}
 
     def semeval2010_8_get_location_and_remove(sent, sub_str):
         loc = sent.find(sub_str)
@@ -533,6 +529,7 @@ class Glad(nlp.GeneratorBasedBuilder):
 
     def oie2016_file_to_spanrels(self, filepath):
         # * Question: can we implement this so we predict all OIE extractions for a sentence at the same time?
+        last_raw, sid = None, 0
         with open(filepath, encoding="utf-8") as f:
             for line in f:
                 if line.startswith("-DOCSTART-") or line == "" or line == "\n":
@@ -566,7 +563,7 @@ class Glad(nlp.GeneratorBasedBuilder):
         if self.config.name == "wetlab":
             raise NotImplementedError('not implemented')
         elif self.config.name.startswith("conll2003"):
-            return self.conll03_file_to_spans(filepath)
+            return self.conll2003_file_to_spans(filepath)
         elif self.config.name == "semeval2010_8":
             return self.semeval2010_8_file_to_spans(filepath)
         elif self.config.name == "ontonotes5":
