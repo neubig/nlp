@@ -4,7 +4,12 @@ import six
 import re
 import json
 import os
-from typing import Dict, List, Tuple
+import logging
+import spacy
+from spacy.tokens import Token
+from typing import Dict, List, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 _CITATION = """\
 @inproceedings{jiang-etal-2020-generalizing,
@@ -268,6 +273,212 @@ _URLS = {
 # Note, some code adapted from the GLAD data-processing code:
 # https://github.com/neulab/cmu-multinlp/tree/master/data
 
+class SimpleToken:
+    def __init__(self, text, idx):
+        self.text = text
+        self.idx = idx
+
+    def __str__(self):
+        return str((self.text, self.idx))
+
+    def __repr__(self):
+        return str((self.text, self.idx))
+
+def adjust_tokens_wrt_char_boundary(tokens: List[Union[Token, SimpleToken]], char_boundaries: List[int]):
+    """
+    positions indicated by char_boundaries should be segmented.
+    If one of the indices is 3, it mean that there is a boundary between the 3rd and 4th char.
+    Indices in char_boundaries should be in ascending order.
+    """
+    new_tokens: List[SimpleToken] = []
+    cb_ind = 0
+    for tok in tokens:
+        start = tok.idx
+        end = tok.idx + len(tok.text)
+        ext_bd = []
+        while cb_ind < len(char_boundaries) and char_boundaries[cb_ind] <= end:
+            bd = char_boundaries[cb_ind]
+            if bd != start and bd != end:  # boundary not detected by tokenizer
+                ext_bd.append(bd)
+            cb_ind += 1
+        for s, e in zip([start] + ext_bd, ext_bd + [end]):
+            text = tok.text[s - start:e - start]
+            new_tokens.append(SimpleToken(text, s))
+    return new_tokens
+
+class BratDoc:
+    """
+    A class to handle files in standoff format and mapping from char-based indices to token-based indices.
+    """
+    EVENT_JOIN_SYM = '->'
+
+    def __init__(self,
+                 id: str,
+                 doc: Union[str, List[str]],   # can be str of chars or a list of tokens
+                 # span_id -> (span_label, start_ind, end_ind), where start_ind is inclusive and end_ind is exclusive
+                 spans: Dict[str, Tuple[str, int, int]],
+                 # (span_id1, span_id2) -> span_pair_label
+                 span_pairs: Dict[Tuple[str, str], str]):
+        self.id = id
+        self.doc = doc
+        self.spans = spans
+        self.span_pairs = span_pairs
+
+    def to_word(self, tokenizer):
+        """
+        Tokenize doc and convert char-based indices to token-based indices.
+        """
+        # tokenize
+        toks = tokenizer(self.doc)
+        # reconcile tokens and char boundaries
+        char_bd = set()
+        for sid, (slabel, start, end) in self.spans.items():
+            char_bd.add(start)
+            char_bd.add(end)
+        toks = adjust_tokens_wrt_char_boundary(toks, char_boundaries=sorted(char_bd))
+        words = [tok.text for tok in toks]
+        # build char index to token index mapping
+        idxs = [(tok.idx, tok.idx + len(tok.text)) for tok in toks]
+        sidx2tidx = dict((s[0], i) for i, s in enumerate(idxs))  # char start ind -> token ind
+        eidx2tidx = dict((s[1], i) for i, s in enumerate(idxs))  # char end ind -> token ind
+        # convert spans
+        new_spans = {}
+        for sid, (span_label, sidx, eidx) in self.spans.items():
+            if sidx in sidx2tidx and eidx in eidx2tidx:
+                new_spans[sid] = (span_label, sidx2tidx[sidx], eidx2tidx[eidx] + 1)  # end index is exclusive
+            else:  # remove blanks and re-check
+                span_str = self.doc[sidx:eidx]
+                blank_str = len(span_str) - len(span_str.lstrip())
+                blank_end = len(span_str) - len(span_str.rstrip())
+                sidx += blank_str
+                eidx -= blank_end
+                if sidx in sidx2tidx and eidx in eidx2tidx:
+                    new_spans[sid] = (span_label, sidx2tidx[sidx], eidx2tidx[eidx] + 1)  # end index is exclusive
+                else:
+                    raise Exception('The annotation boundaries is not consistent with the tokenization boundaries.')
+        # convert span pairs
+        new_span_pairs = dict(((s1, s2), v) for (s1, s2), v in self.span_pairs.items()
+                              if s1 in new_spans and s2 in new_spans)
+        return BratDoc(self.id, words, new_spans, new_span_pairs)
+
+    def to_dict_of_list(self):
+        """
+        Convert the dictionaries of spans and span_pairs to dictionaries of lists.
+        """
+        key2ind: Dict[str, int] = {}
+        span_starts: List[int] = []
+        span_ends: List[int] = []
+        span_labels: List[int] = []
+        for key, (l, s, e) in self.spans.items():
+            key2ind[key] = len(key2ind)
+            span_starts.append(s)
+            span_ends.append(e)
+            span_labels.append(l)
+        spanpair_starts: List[int] = []
+        spanpair_ends: List[int] = []
+        spanpair_labels: List[int] = []
+        for (s1, s2), l in self.span_pairs.items():
+            spanpair_starts.append(key2ind[s1])
+            spanpair_ends.append(key2ind[s2])
+            spanpair_labels.append(l)
+        return {'start': span_starts, 'end': span_ends, 'tag': span_labels}, \
+               {'start': spanpair_starts, 'end': spanpair_ends, 'tag': spanpair_labels}
+
+    def split_by_sentence(self, sentencizer=None) -> List:
+        """
+        Split a document into multiple documents by sentence boundaries.
+        """
+        # sentencize (should return the offset between two adjacent sentences)
+        sents = list(sentencizer(self.doc))
+        # collect spans for each sentence
+        spans_ord = sorted(self.spans.items(), key=lambda x: (x[1][1], x[1][2]))  # sorted by start ind and end ind
+        num_skip_char = 0
+        span_ind = 0
+        spans_per_sent = []
+        for i, (sent, off) in enumerate(sents):
+            num_skip_char += off
+            spans_per_sent.append([])
+            cur_span = spans_per_sent[-1]
+            # start ind and end ind should be not larger than a threshold
+            while span_ind < len(spans_ord) and \
+                    spans_ord[span_ind][1][1] < num_skip_char + len(sent) and \
+                    spans_ord[span_ind][1][2] <= num_skip_char + len(sent):
+                if spans_ord[span_ind][1][1] < num_skip_char or \
+                        spans_ord[span_ind][1][2] <= num_skip_char:
+                    logger.warning('A span is splitted across sentences.')
+                    span_ind += 1
+                    continue
+                sid, (slabel, sind, eind) = spans_ord[span_ind]
+                cur_span.append((sid, (slabel, sind - num_skip_char, eind - num_skip_char)))
+                span_ind += 1
+            num_skip_char += len(sent)
+        # collect span pairs for each sentence (span pairs across sentences are not allowed)
+        pair_count = 0
+        brat_doc_li = []
+        for i, spans in enumerate(spans_per_sent):
+            if len(sents[i][0]) <= 0:  # skip empty sentences
+                continue
+            span_ids = set(span[0] for span in spans)
+            span_pair = dict(((s1, s2), v) for (s1, s2), v in self.span_pairs.items()
+                             if s1 in span_ids and s2 in span_ids)
+            pair_count += len(span_pair)
+            brat_doc_li.append(BratDoc(self.id, sents[i][0], dict(spans), span_pair))
+        return brat_doc_li
+
+    @classmethod
+    def from_file(cls, text_file: str, ann_file: str):
+        """
+        Read text and annotations from files in standoff format.
+        """
+        with open(text_file, 'r') as txtf:
+            doc = txtf.read().rstrip()
+        spans = {}
+        span_pairs = {}
+        eventid2triggerid = {}  # e.g., E10 -> T27
+        with open(ann_file, 'r') as annf:
+            for l in annf:
+                if l.startswith('#'):  # skip comment
+                    continue
+                if l.startswith('T'):
+                    # 1. there are some special chars at the end of the line, so we only strip \n
+                    # 2. there are \t in text spans, so we only split twice
+                    ann = l.rstrip('\t\n').split('\t', 2)
+                else:
+                    ann = l.rstrip().split('\t')
+                aid = ann[0]
+                if aid.startswith('T'):  # text span annotation
+                    # TODO: consider non-contiguous span
+                    span_label, sind, eind = ann[1].split(';')[0].split(' ')
+                    sind, eind = int(sind), int(eind)
+                    spans[aid] = (span_label, sind, eind)
+                elif aid.startswith('E'):  # event span annotation
+                    events = ann[1].split(' ')
+                    trigger_type, trigger_aid = events[0].split(':')
+                    eventid2triggerid[aid] = trigger_aid
+                    for event in events[1:]:
+                        arg_type, arg_aid = event.split(':')
+                        span_pairs[(trigger_aid, arg_aid)] = trigger_type + cls.EVENT_JOIN_SYM + arg_type
+                elif aid.startswith('R'):  # relation annotation
+                    rel = ann[1].split(' ')
+                    assert len(rel) == 3
+                    rel_type = rel[0]
+                    arg1_aid = rel[1].split(':')[1]
+                    arg2_aid = rel[2].split(':')[1]
+                    span_pairs[(arg1_aid, arg2_aid)] = rel_type
+                elif not aid[0].istitle():
+                    continue  # skip lines not starting with upper case characters
+                else:
+                    raise NotImplementedError
+        # convert event id to text span id
+        span_pairs_converted = {}
+        for (sid1, sid2), v in span_pairs.items():
+            if sid1.startswith('E'):
+                sid1 = eventid2triggerid[sid1]
+            if sid2.startswith('E'):
+                sid2 = eventid2triggerid[sid2]
+            span_pairs_converted[(sid1, sid2)] = v
+        return cls(ann_file, doc, spans, span_pairs_converted)
+
 class GladConfig(nlp.BuilderConfig):
     """BuilderConfig for Break"""
 
@@ -355,7 +566,7 @@ class Glad(nlp.GeneratorBasedBuilder):
                     ),
                 }
             )
-        elif self.config.name.startswith("oie2016"):
+        elif self.config.name.startswith("oie2016") or self.config.name.startswith('semeval2010_8'):
             features = nlp.Features(
                 {
                     "words": nlp.Sequence(nlp.Value("string")),
@@ -478,7 +689,7 @@ class Glad(nlp.GeneratorBasedBuilder):
                 yield sid+1, {"words": self.conll_col(seg,0), "pos_tags": self.conll_col(seg,1),
                               "chunk_spans": self.conll2003_spans(seg,2), "ner_spans": self.conll2003_spans(seg,3)}
 
-    def semeval2010_8_get_location_and_remove(sent, sub_str):
+    def semeval2010_8_get_location_and_remove(self, sent, sub_str):
         loc = sent.find(sub_str)
         sent = sent.replace(sub_str, '')
         return loc, sent
@@ -487,17 +698,12 @@ class Glad(nlp.GeneratorBasedBuilder):
         # Questions about the following code:
         # * How to deal with tokenization in semeval2010_8? It seems that the text is not tokenized (e.g. punctuation is still attached to the words) in the annotated data, so it's non-trivial to get word boundaries and spans/relations associated with individual word IDs.
         # * It seems that it's treating "Cause-Effect(e1,e2)" and "Cause-Effect(e2,e1)" as different relation labels, and always having the arrows point from left to right? It seems like maybe just having the relation be "Cause-Effect" and having the arrow point from e1 to e2 might be a better option.
-        raise NotImplementedError('semeval2010_8_file_to_spanrels not implemented yet')
-
+        nlp = spacy.load('en_core_web_sm', disable=['parser', 'tagger', 'ner'])
         with open(filepath, 'r') as fin:
-            ns = 0
-            sent_offset = 0
             while True:
                 sent = fin.readline().strip()
                 if sent is None or sent == '':
                     break
-                entity_ind, rel_ind = 1, 1
-
                 rel = fin.readline().strip()
                 _ = fin.readline()
                 _ = fin.readline()
@@ -506,27 +712,25 @@ class Glad(nlp.GeneratorBasedBuilder):
                 sent = sent[1:-1]  # remove "
                 e1_start, sent = self.semeval2010_8_get_location_and_remove(sent, '<e1>')
                 e1_end, sent = self.semeval2010_8_get_location_and_remove(sent, '</e1>')
-                e1 = sent[e1_start:e1_end]
                 e2_start, sent = self.semeval2010_8_get_location_and_remove(sent, '<e2>')
                 e2_end, sent = self.semeval2010_8_get_location_and_remove(sent, '</e2>')
-                e2 = sent[e2_start:e2_end]
                 if e2_start <= e1_end:
-                    raise Exception('e1 should be before e2')
-
-                doc_out.write('{}\n'.format(sent))
-
-                k1, k2 = 'T{}'.format(entity_ind), 'T{}'.format(entity_ind + 1)
-                ann_out.write('{}\t{} {} {}\t{}\n'.format(
-                    k1, 'mention', e1_start + sent_offset, e1_end + sent_offset, e1))
-                ann_out.write('{}\t{} {} {}\t{}\n'.format(
-                    k2, 'mention', e2_start + sent_offset, e2_end + sent_offset, e2))
-                ann_out.write('{}\t{} {} {}\n'.format(
-                    'R{}'.format(rel_ind), rel, 'Arg1:{}'.format(k1), 'Arg2:{}'.format(k2)))
-
-                sent_offset += len(sent) + 1
-                entity_ind += 2
-                rel_ind += 1
-                ns += 1
+                    raise Exception('e1 should be before e2.')
+                # merge two directions
+                rel = rel.split('(')
+                if len(rel) == 2:
+                    rel, dire = rel
+                else:
+                    rel, dire = rel[0], 'e1,e2)'  # default is left-right
+                assert dire in {'e1,e2)', 'e2,e1)'}
+                if dire == 'e2,e1)':
+                    e1_start, e1_end, e2_start, e2_end = e2_start, e2_end, e1_start, e1_end
+                bd = BratDoc(id=sid, doc=sent,
+                             spans={'T1': ('mention', e1_start, e1_end), 'T2': ('mention', e2_start, e2_end)},
+                             span_pairs={('T1', 'T2'): rel})
+                bd = bd.to_word(tokenizer=nlp)
+                spans, spanpairs = bd.to_dict_of_list()
+                yield sid, {'words': bd.doc, 'spans': spans, 'rels': spanpairs}
 
     def oie2016_spanrels(self, seg):
         open_re = r'\(([A-Z0-9]+)\*(\)?)'
@@ -590,7 +794,7 @@ class Glad(nlp.GeneratorBasedBuilder):
         elif self.config.name.startswith("conll2003"):
             return self.conll2003_file_to_spans(filepath)
         elif self.config.name == "semeval2010_8":
-            return self.semeval2010_8_file_to_spans(filepath)
+            return self.semeval2010_8_file_to_spanrels(filepath)
         elif self.config.name == "ontonotes5":
             raise NotImplementedError('not implemented')
         elif self.config.name == "ptb":
@@ -607,7 +811,8 @@ class Glad(nlp.GeneratorBasedBuilder):
 # TODO: This is for debugging, remove before final commit
 if __name__ == "__main__":
     from nlp import load_dataset
-    dataset = load_dataset("./datasets/glad", "oie2016")
+    dataset = load_dataset("./datasets/glad", "semeval2010_8")
     for spl in ('train', 'validation', 'test'):
-        dataset_spl = dataset[spl]
-        print(dataset_spl[-1])
+        if spl in dataset:
+            dataset_spl = dataset[spl]
+            print(dataset_spl[-1])
