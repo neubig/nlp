@@ -284,28 +284,6 @@ class SimpleToken:
     def __repr__(self):
         return str((self.text, self.idx))
 
-def adjust_tokens_wrt_char_boundary(tokens: List[Union[Token, SimpleToken]], char_boundaries: List[int]):
-    """
-    positions indicated by char_boundaries should be segmented.
-    If one of the indices is 3, it mean that there is a boundary between the 3rd and 4th char.
-    Indices in char_boundaries should be in ascending order.
-    """
-    new_tokens: List[SimpleToken] = []
-    cb_ind = 0
-    for tok in tokens:
-        start = tok.idx
-        end = tok.idx + len(tok.text)
-        ext_bd = []
-        while cb_ind < len(char_boundaries) and char_boundaries[cb_ind] <= end:
-            bd = char_boundaries[cb_ind]
-            if bd != start and bd != end:  # boundary not detected by tokenizer
-                ext_bd.append(bd)
-            cb_ind += 1
-        for s, e in zip([start] + ext_bd, ext_bd + [end]):
-            text = tok.text[s - start:e - start]
-            new_tokens.append(SimpleToken(text, s))
-    return new_tokens
-
 class BratDoc:
     """
     A class to handle files in standoff format and mapping from char-based indices to token-based indices.
@@ -324,6 +302,28 @@ class BratDoc:
         self.spans = spans
         self.span_pairs = span_pairs
 
+    def adjust_tokens_wrt_char_boundary(self, tokens: List[Union[Token, SimpleToken]], char_boundaries: List[int]):
+        """
+        positions indicated by char_boundaries should be segmented.
+        If one of the indices is 3, it mean that there is a boundary between the 3rd and 4th char.
+        Indices in char_boundaries should be in ascending order.
+        """
+        new_tokens: List[SimpleToken] = []
+        cb_ind = 0
+        for tok in tokens:
+            start = tok.idx
+            end = tok.idx + len(tok.text)
+            ext_bd = []
+            while cb_ind < len(char_boundaries) and char_boundaries[cb_ind] <= end:
+                bd = char_boundaries[cb_ind]
+                if bd != start and bd != end:  # boundary not detected by tokenizer
+                    ext_bd.append(bd)
+                cb_ind += 1
+            for s, e in zip([start] + ext_bd, ext_bd + [end]):
+                text = tok.text[s - start:e - start]
+                new_tokens.append(SimpleToken(text, s))
+        return new_tokens
+
     def to_word(self, tokenizer):
         """
         Tokenize doc and convert char-based indices to token-based indices.
@@ -335,7 +335,7 @@ class BratDoc:
         for sid, (slabel, start, end) in self.spans.items():
             char_bd.add(start)
             char_bd.add(end)
-        toks = adjust_tokens_wrt_char_boundary(toks, char_boundaries=sorted(char_bd))
+        toks = self.adjust_tokens_wrt_char_boundary(toks, char_boundaries=sorted(char_bd))
         words = [tok.text for tok in toks]
         # build char index to token index mapping
         idxs = [(tok.idx, tok.idx + len(tok.text)) for tok in toks]
